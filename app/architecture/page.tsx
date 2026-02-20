@@ -570,6 +570,322 @@ const diagrams = [
   WORKFLOW_SESSION ||--o| PAYMENT : "paid via"
   WORKFLOW_SESSION ||--o| DEPLOYED_WORKFLOW : "results in"`,
   },
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // STAGE 2 — CRE MIGRATION (DOGFOODING)
+  // ════════════════════════════════════════════════════════════════════════════
+
+  // ── 11. STAGE 2 SYSTEM ARCHITECTURE ─────────────────────────────────────────
+  {
+    id: "stage2-arch",
+    title: "11. Stage 2 — CRE-Native System Architecture",
+    description:
+      "After Stage 1 is proven, the agent pipeline moves off FastAPI and into Chainlink CRE itself. FastAPI shrinks to a thin auth + session layer. OnyxLab runs its own orchestration on the same infrastructure it deploys to.",
+    chart: `graph TB
+  subgraph CLIENT["Client Layer (Next.js — unchanged)"]
+    direction LR
+    FE_LAND["Landing"]
+    FE_DASH["Dashboard"]
+    FE_WIZ["Wizard"]
+    FE_HIST["History"]
+  end
+
+  subgraph THIN["Thin FastAPI Layer (Stage 2 reduced scope)"]
+    direction TB
+    AUTH["Wallet Signature Auth"]
+    SESSION["Session Manager"]
+    DB_API["DB Read/Write API"]
+    HEALTH["Health + Status"]
+  end
+
+  subgraph CRE_LAYER["CRE Orchestration Layer (Stage 2 NEW)"]
+    direction TB
+    CRE_WF["Master Workflow\n(YAML orchestrator)"]
+    CRE_F1["CRE Function 1\ngemini-propose"]
+    CRE_F2["CRE Function 2\nx402-verify"]
+    CRE_F3["CRE Function 3\ngemini-codegen"]
+    CRE_F4["CRE Function 4\ncre-self-deploy"]
+    CRE_WF --> CRE_F1 --> CRE_F2 --> CRE_F3 --> CRE_F4
+  end
+
+  subgraph EXT["External Services"]
+    GEMINI["Gemini API"]
+    EVM_NET["EVM Network (x402)"]
+    CRE_RT["CRE Runtime Registry"]
+  end
+
+  subgraph STORE["Persistence"]
+    PG[("PostgreSQL")]
+  end
+
+  CLIENT -->|"REST calls"| THIN
+  THIN -->|"trigger workflow"| CRE_LAYER
+  CRE_F1 -->|"HTTP"| GEMINI
+  CRE_F2 -->|"poll tx"| EVM_NET
+  CRE_F3 -->|"HTTP"| GEMINI
+  CRE_F4 -->|"cre deploy"| CRE_RT
+  THIN <-->|"read/write"| PG
+  CRE_LAYER -->|"callback results"| THIN
+
+  style CLIENT fill:#1e1b4b,stroke:#6d28d9,color:#e0e7ff
+  style THIN fill:#1c1917,stroke:#78716c,color:#e7e5e4
+  style CRE_LAYER fill:#052e16,stroke:#16a34a,color:#d1fae5
+  style EXT fill:#0f172a,stroke:#334155,color:#e2e8f0
+  style STORE fill:#1c1917,stroke:#d97706,color:#fef3c7`,
+  },
+
+  // ── 12. STAGE 1 vs STAGE 2 COMPARISON ───────────────────────────────────────
+  {
+    id: "stage-comparison",
+    title: "12. Stage 1 vs Stage 2 — Migration Map",
+    description:
+      "Side-by-side comparison of what runs where in each stage. Every component in Stage 1 FastAPI that moves to CRE in Stage 2, and what stays in the thin FastAPI layer.",
+    chart: `flowchart LR
+  subgraph S1["STAGE 1 — FastAPI handles everything"]
+    direction TB
+    S1_FE["Next.js Frontend"]
+    S1_API["FastAPI Backend"]
+    S1_GEMINI_PROPOSE["AgentService.propose()"]
+    S1_GEMINI_REGEN["AgentService.regenerate()"]
+    S1_PAY["PaymentService.verify_tx()"]
+    S1_CODEGEN["AgentService.generate_code()"]
+    S1_DEPLOY["DeployService.run_cre_cli()"]
+    S1_DB[("PostgreSQL")]
+
+    S1_API --> S1_GEMINI_PROPOSE & S1_GEMINI_REGEN & S1_PAY & S1_CODEGEN & S1_DEPLOY
+    S1_API <--> S1_DB
+  end
+
+  subgraph S2["STAGE 2 — CRE handles orchestration"]
+    direction TB
+    S2_FE["Next.js Frontend\n(unchanged)"]
+    S2_THIN["Thin FastAPI\n(auth + session + DB only)"]
+    S2_CRE1["CRE Function 1\ngemini-propose + regenerate"]
+    S2_CRE2["CRE Function 2\nx402-verify"]
+    S2_CRE3["CRE Function 3\ngemini-codegen"]
+    S2_CRE4["CRE Function 4\ncre-self-deploy"]
+    S2_DB[("PostgreSQL\nunchanged")]
+
+    S2_THIN --> S2_CRE1 --> S2_CRE2 --> S2_CRE3 --> S2_CRE4
+    S2_THIN <--> S2_DB
+  end
+
+  MIGRATES(["What MOVES to CRE"])
+  STAYS(["What STAYS in FastAPI"])
+
+  S1_GEMINI_PROPOSE -.->|"becomes"| S2_CRE1
+  S1_GEMINI_REGEN -.->|"becomes"| S2_CRE1
+  S1_PAY -.->|"becomes"| S2_CRE2
+  S1_CODEGEN -.->|"becomes"| S2_CRE3
+  S1_DEPLOY -.->|"becomes"| S2_CRE4
+
+  style S1 fill:#1e1b4b,stroke:#6d28d9,color:#e0e7ff
+  style S2 fill:#052e16,stroke:#16a34a,color:#d1fae5
+  style MIGRATES fill:#7c3aed,color:#fff,stroke:#6d28d9
+  style STAYS fill:#1c1917,stroke:#78716c,color:#e7e5e4`,
+  },
+
+  // ── 13. CRE FUNCTION CHAIN (STAGE 2) ────────────────────────────────────────
+  {
+    id: "cre-function-chain",
+    title: "13. Stage 2 — CRE Function Chain Internals",
+    description:
+      "Detailed internal logic of each of the 4 CRE functions that make up the OnyxLab orchestration workflow in Stage 2. Each function is a self-contained CRE JS function triggered in sequence.",
+    chart: `flowchart TD
+  TRIGGER(["FastAPI triggers\nMaster CRE Workflow"]) --> F1
+
+  subgraph F1["CRE Function 1 — gemini-propose"]
+    direction TB
+    F1A["Receive: user_prompt, session_id, feedback?"]
+    F1B["Build Gemini system prompt\n(CRE context + Mermaid format)"]
+    F1C["HTTP POST to Gemini API"]
+    F1D["Extract mermaid block from response"]
+    F1E["Validate Mermaid syntax"]
+    F1F{Valid?}
+    F1G["Retry with correction\n(max 3)"]
+    F1H["Return: mermaid_chart, iteration_id"]
+    F1A --> F1B --> F1C --> F1D --> F1E --> F1F
+    F1F -- No --> F1G --> F1C
+    F1F -- Yes --> F1H
+  end
+
+  subgraph F2["CRE Function 2 — x402-verify"]
+    direction TB
+    F2A["Receive: tx_hash, payment_id, session_id"]
+    F2B["Call EVM RPC: getTransactionReceipt"]
+    F2C{Confirmed?}
+    F2D["Wait 3s, retry\n(max 20 attempts)"]
+    F2E["Verify recipient + amount match"]
+    F2F{Match?}
+    F2G["Return: error — wrong payment"]
+    F2H["Return: verified, block_number"]
+    F2A --> F2B --> F2C
+    F2C -- No --> F2D --> F2B
+    F2C -- Yes --> F2E --> F2F
+    F2F -- No --> F2G
+    F2F -- Yes --> F2H
+  end
+
+  subgraph F3["CRE Function 3 — gemini-codegen"]
+    direction TB
+    F3A["Receive: prompt, mermaid_chart, session_id"]
+    F3B["Build codegen prompt\n(CRE YAML schema + JS template)"]
+    F3C["HTTP POST to Gemini API"]
+    F3D["Extract YAML block"]
+    F3E["Extract JS block"]
+    F3F["Validate YAML against CRE schema"]
+    F3G{Both valid?}
+    F3H["Retry with error details\n(max 3)"]
+    F3I["Return: yaml_content, js_content"]
+    F3A --> F3B --> F3C --> F3D & F3E --> F3F --> F3G
+    F3G -- No --> F3H --> F3C
+    F3G -- Yes --> F3I
+  end
+
+  subgraph F4["CRE Function 4 — cre-self-deploy"]
+    direction TB
+    F4A["Receive: yaml_content, js_content, session_id"]
+    F4B["Write artifacts to tmp/session_id/"]
+    F4C["Execute: cre deploy --file workflow.yaml"]
+    F4D{Exit code 0?}
+    F4E["Parse stdout: extract workflow_id"]
+    F4F["Cleanup tmp files"]
+    F4G["Return: workflow_id, status: live"]
+    F4H["Retry (max 2)"]
+    F4I["Return: error details"]
+    F4A --> F4B --> F4C --> F4D
+    F4D -- Yes --> F4E --> F4F --> F4G
+    F4D -- No --> F4H --> F4C
+    F4H -->|"after max retries"| F4I
+  end
+
+  F1H --> F2
+  F2H --> F3
+  F3I --> F4
+  F4G --> DONE(["Callback to FastAPI\nPersist to DB\nNotify frontend"])
+
+  style TRIGGER fill:#7c3aed,color:#fff,stroke:#6d28d9
+  style DONE fill:#059669,color:#fff,stroke:#047857
+  style F1 fill:#1e1b4b,stroke:#6d28d9,color:#e0e7ff
+  style F2 fill:#1c1917,stroke:#d97706,color:#fef3c7
+  style F3 fill:#1e1b4b,stroke:#7c3aed,color:#ddd6fe
+  style F4 fill:#052e16,stroke:#16a34a,color:#d1fae5`,
+  },
+
+  // ── 14. STAGE 2 END-TO-END SEQUENCE ─────────────────────────────────────────
+  {
+    id: "stage2-e2e-sequence",
+    title: "14. Stage 2 — End-to-End Sequence (CRE as Orchestrator)",
+    description:
+      "Full chronological sequence for Stage 2 where the Chainlink CRE runtime drives the agent pipeline. FastAPI only manages sessions and the database — all orchestration is on-chain.",
+    chart: `sequenceDiagram
+  autonumber
+  actor User
+  participant FE as Frontend
+  participant FA as Thin FastAPI
+  participant CRE as CRE Master Workflow
+  participant F1 as CRE Fn1 gemini-propose
+  participant F2 as CRE Fn2 x402-verify
+  participant F3 as CRE Fn3 gemini-codegen
+  participant F4 as CRE Fn4 cre-self-deploy
+  participant DB as PostgreSQL
+
+  User->>FE: Connect wallet + submit prompt
+  FE->>FA: POST /session/create {wallet, prompt}
+  FA->>DB: Insert workflow_session (status: pending)
+  FA-->>FE: {session_id}
+
+  FE->>FA: POST /agent/propose {session_id, prompt}
+  FA->>CRE: Trigger Master Workflow {session_id, prompt}
+  CRE->>F1: execute gemini-propose {prompt}
+  F1-->>CRE: {mermaid_chart, iteration_id}
+  CRE->>FA: callback {mermaid_chart}
+  FA->>DB: Insert architecture_iteration
+  FA-->>FE: {mermaid_chart}
+  FE-->>User: Render Mermaid diagram
+
+  alt User rejects
+    User->>FE: Submit feedback
+    FE->>FA: POST /agent/regenerate {session_id, feedback}
+    FA->>CRE: Trigger Master Workflow {session_id, feedback, prev_diagram}
+    CRE->>F1: execute gemini-propose {prompt + feedback}
+    F1-->>CRE: {new mermaid_chart}
+    CRE->>FA: callback {new mermaid_chart}
+    FA-->>FE: {new mermaid_chart}
+  end
+
+  User->>FE: Approve + initiate x402 payment
+  FE->>FA: POST /payment/create {session_id}
+  FA-->>FE: {payment_id, amount, recipient}
+  FE->>User: Show x402 payment card
+  User->>FE: Confirm tx on wallet
+  FE->>FA: POST /payment/submit {tx_hash, payment_id}
+
+  FA->>CRE: Trigger Master Workflow {session_id, tx_hash, payment_id}
+  CRE->>F2: execute x402-verify {tx_hash}
+  F2-->>CRE: {verified: true, block_number}
+  CRE->>F3: execute gemini-codegen {prompt, diagram}
+  F3-->>CRE: {yaml_content, js_content}
+  CRE->>F4: execute cre-self-deploy {yaml, js}
+  F4-->>CRE: {workflow_id, status: live}
+
+  CRE->>FA: callback {workflow_id, status: deployed}
+  FA->>DB: Update session + insert deployed_workflow
+  FA-->>FE: {workflow_id, status: deployed}
+  FE-->>User: Workflow Live confirmation`,
+  },
+
+  // ── 15. DOGFOODING CONCEPT ───────────────────────────────────────────────────
+  {
+    id: "dogfooding",
+    title: "15. Stage 2 — Dogfooding Architecture (Self-Referential Deployment)",
+    description:
+      "The self-referential nature of Stage 2: OnyxLab's own agent pipeline is itself a CRE workflow deployed on the Chainlink Runtime Environment — the platform literally uses itself to operate.",
+    chart: `flowchart TD
+  USER(["User on OnyxLab"])
+
+  subgraph ONYXLAB["OnyxLab Platform"]
+    direction TB
+    FE2["Next.js Frontend"]
+    BE2["Thin FastAPI"]
+    FE2 --> BE2
+  end
+
+  subgraph CRE_META["Chainlink Runtime Environment"]
+    direction TB
+
+    subgraph ONYXLAB_WF["OnyxLab Master Workflow (deployed by us)"]
+      direction LR
+      F1_M["Fn1: gemini-propose"]
+      F2_M["Fn2: x402-verify"]
+      F3_M["Fn3: gemini-codegen"]
+      F4_M["Fn4: cre-self-deploy"]
+      F1_M --> F2_M --> F3_M --> F4_M
+    end
+
+    subgraph USER_WF["User Deployed Workflows (deployed by OnyxLab)"]
+      direction LR
+      UWF1["User Workflow A\n(price monitor)"]
+      UWF2["User Workflow B\n(auto-stake)"]
+      UWF3["User Workflow C\n(NFT alert)"]
+    end
+  end
+
+  USER -->|"describes automation"| FE2
+  BE2 -->|"triggers"| ONYXLAB_WF
+  F4_M -->|"deploys into same CRE"| USER_WF
+
+  LOOP(["Same CRE runtime\nhosts both the platform\nworkflow AND user workflows"])
+
+  CRE_META --> LOOP
+
+  style USER fill:#7c3aed,color:#fff,stroke:#6d28d9
+  style ONYXLAB fill:#1e1b4b,stroke:#6d28d9,color:#e0e7ff
+  style CRE_META fill:#052e16,stroke:#16a34a,color:#d1fae5
+  style ONYXLAB_WF fill:#1a2e1a,stroke:#22c55e,color:#bbf7d0
+  style USER_WF fill:#1a2e1a,stroke:#4ade80,color:#d1fae5
+  style LOOP fill:#d97706,color:#000,stroke:#b45309`,
+  },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -667,9 +983,9 @@ export default function ArchitecturePage() {
         >
           <p className="text-sm text-zinc-500">
             All diagrams rendered with{" "}
-            <span className="text-zinc-300 font-medium">Mermaid.js</span>. Dashed
-            components represent backend services to be built. Solid components are
-            implemented or mocked in the current frontend build.
+            <span className="text-zinc-300 font-medium">Mermaid.js</span>.
+            {" "}Diagrams 1–10 cover the Stage 1 (FastAPI) architecture.
+            {" "}Diagrams 11–15 cover the Stage 2 CRE-native migration (dogfooding).
           </p>
         </motion.div>
       </main>

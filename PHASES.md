@@ -13,9 +13,10 @@ Phase 3  →  Gemini AI Agent Integration
 Phase 4  →  x402 Payment Integration
 Phase 5  →  Chainlink CRE Deployment Integration
 Phase 6  →  Testing, Polish & Production Deploy
+Phase 7  →  Stage 2: CRE Migration (Dogfooding)
 ```
 
-**Total estimated timeline: ~5–6 weeks** (solo developer, part-time)
+**Total estimated timeline: ~8–9 weeks** (solo developer, part-time)
 
 ---
 
@@ -295,6 +296,7 @@ OnyxLab live in production. Full pipeline tested and hardened.
 | Phase 4 | x402 Payment Integration | Week 4 | 🔲 Not started |
 | Phase 5 | CRE Deployment Integration | Week 4–5 | 🔲 Not started |
 | Phase 6 | Testing, Polish & Production | Week 5–6 | 🔲 Not started |
+| Phase 7 | Stage 2: CRE Migration (Dogfooding) | Week 7–8 | 🔲 Not started |
 
 ---
 
@@ -312,7 +314,11 @@ Phase 4 — x402 payment gate (requires agent to generate code post-payment)
 Phase 5 — CRE deploy (requires payment verified before deploy runs)
     ↓
 Phase 6 — Testing + deploy (requires all above complete)
+    ↓
+Phase 7 — CRE migration (requires Phase 6 stable in production)
 ```
+
+> Phase 7 is the only phase that can run independently of user-facing features — it is a backend infrastructure migration. The frontend does not change.
 
 > Phases 3, 4, and 5 must be built in order — each one unlocks the next step of the wizard.
 
@@ -347,6 +353,89 @@ CRE_API_KEY=
 ENVIRONMENT=development
 SECRET_KEY=
 ```
+
+---
+
+## Phase 7 — Stage 2: CRE Migration (Dogfooding)
+
+**Goal:** Migrate the OnyxLab agent pipeline off FastAPI and into the Chainlink Runtime Environment itself — making OnyxLab run on the same infrastructure it deploys to.
+
+**Duration:** Week 7–8 (est. 7–10 days)
+
+### Prerequisites
+- Phase 6 complete — platform is live and stable in production
+- Stage 1 pipeline fully battle-tested
+- CRE CLI and deployment process well understood from Phase 5
+
+### What Moves to CRE
+
+| Stage 1 (FastAPI) | Stage 2 (CRE Function) |
+|---|---|
+| `AgentService.propose()` | CRE Function 1: `gemini-propose` |
+| `AgentService.regenerate()` | CRE Function 1: `gemini-propose` (with feedback) |
+| `PaymentService.verify_tx()` | CRE Function 2: `x402-verify` |
+| `AgentService.generate_code()` | CRE Function 3: `gemini-codegen` |
+| `DeployService.run_cre_cli()` | CRE Function 4: `cre-self-deploy` |
+
+### What Stays in FastAPI
+- Wallet signature authentication
+- Session creation and management
+- Database read/write (PostgreSQL)
+- Health check endpoint
+- Callback receiver from CRE workflows
+
+### Folder Structure Changes
+```
+backend/
+├── (existing files — mostly unchanged)
+├── services/
+│   ├── agent_service.py       # DEPRECATED — logic moves to CRE
+│   ├── payment_service.py     # DEPRECATED — logic moves to CRE
+│   ├── deploy_service.py      # Reduced to: trigger CRE workflow only
+│   └── history_service.py     # Unchanged
+└── cre_workflows/             # NEW
+    ├── master_workflow.yaml   # CRE master orchestration workflow
+    ├── fn1_gemini_propose.js  # CRE Function 1
+    ├── fn2_x402_verify.js     # CRE Function 2
+    ├── fn3_gemini_codegen.js  # CRE Function 3
+    └── fn4_cre_self_deploy.js # CRE Function 4
+```
+
+### Tasks
+
+**Prepare**
+- [ ] Document all Gemini prompts from Stage 1 (propose + codegen)
+- [ ] Document all EVM polling logic from Stage 1
+- [ ] Map all env vars needed inside CRE functions
+- [ ] Confirm CRE supports outbound HTTP (for Gemini API calls)
+- [ ] Confirm CRE supports EVM RPC calls (for x402 verification)
+- [ ] Confirm CRE supports subprocess or CLI execution (for self-deploy)
+
+**Build CRE Functions**
+- [ ] Write `fn1_gemini_propose.js` — Gemini HTTP call + Mermaid extraction
+- [ ] Write `fn2_x402_verify.js` — EVM RPC polling + amount/recipient check
+- [ ] Write `fn3_gemini_codegen.js` — Gemini HTTP call + YAML/JS extraction + schema validation
+- [ ] Write `fn4_cre_self_deploy.js` — CRE CLI execution + output parsing + cleanup
+- [ ] Write `master_workflow.yaml` — chains all 4 functions in sequence with error handling
+- [ ] Test each function individually in CRE sandbox
+- [ ] Test full 4-function chain end to end
+
+**Migrate Backend**
+- [ ] Add CRE workflow trigger to `deploy_service.py` (replace direct calls)
+- [ ] Add CRE callback receiver endpoint `POST /api/v1/cre/callback`
+- [ ] Deprecate `agent_service.py` and `payment_service.py` (keep as fallback)
+- [ ] Update all relevant routers to use CRE trigger instead of direct service calls
+- [ ] Deploy OnyxLab master workflow to CRE production
+
+**Validate**
+- [ ] Full pipeline test: prompt → CRE propose → CRE verify → CRE codegen → CRE deploy
+- [ ] Test rejection loop through CRE Function 1
+- [ ] Test payment failure path through CRE Function 2
+- [ ] Confirm user workflows still deploy correctly into CRE alongside OnyxLab's own workflow
+- [ ] Load test: multiple concurrent sessions triggering CRE workflows
+
+### Deliverable
+OnyxLab's agent pipeline runs entirely inside Chainlink CRE. FastAPI is a thin session/auth layer only. The platform uses itself — described in the dogfooding diagram.
 
 ---
 
